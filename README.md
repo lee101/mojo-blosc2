@@ -85,12 +85,16 @@ mean Mojo is slower and values above 1.00 mean Mojo is faster.
 
 | case | mojo-blosc2 | upstream blosc2 | relative |
 | --- | ---: | ---: | ---: |
-| compress int32 arange, 8 MB | 3.85 ms | 4.03 ms | 1.04x |
-| decompress int32 arange, 8 MB | 4.77 ms | 1.89 ms | 0.40x |
-| compress smooth float64, 16 MB | 22.58 ms | 17.03 ms | 0.75x |
-| decompress smooth float64, 16 MB | 13.55 ms | 7.80 ms | 0.58x |
-| compress random bytes, 8 MiB | 7.31 ms | 4.60 ms | 0.63x |
-| decompress memcpy chunk, 8 MiB | 2.26 ms | 2.03 ms | 0.90x |
+| compress int32 arange, 8 MB | 2.33 ms | 2.49 ms | 1.07x |
+| decompress int32 arange, 8 MB | 4.35 ms | 1.37 ms | 0.32x |
+| compress smooth float64, 16 MB | 20.88 ms | 14.13 ms | 0.68x |
+| decompress smooth float64, 16 MB | 9.94 ms | 4.42 ms | 0.44x |
+| compress random bytes, 8 MiB | 2.99 ms | 2.26 ms | 0.76x |
+| decompress memcpy chunk, 8 MiB | 1.06 ms | 1.16 ms | 1.10x |
+
+For the thresholded direct helpers, a 64 MB int32 buffer shuffled in 51.18 ms
+with one worker and 27.00 ms with four; unshuffle moved from 43.92 ms to
+24.68 ms. Smaller inputs remain serial.
 
 There is intentionally no GPU path. Shuffle, fill, copies, and hash-table
 clearing move far more bytes than arithmetic operations, while LZ4 parsing is

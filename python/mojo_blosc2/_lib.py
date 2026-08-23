@@ -69,7 +69,9 @@ class BufferExport:
     def close(self) -> None:
         if self.exported:
             self.exported = False
-            _release_buffer(ctypes.byref(self.buffer))
+            release_buffer = globals().get("_release_buffer")
+            if release_buffer is not None:
+                release_buffer(ctypes.byref(self.buffer))
 
     @property
     def address(self) -> int:
@@ -136,10 +138,14 @@ _thread_state = threading.local()
 
 def workspaces(blocksize: int) -> tuple[bytearray, BufferExport, object]:
     scratch = getattr(_thread_state, "scratch", None)
+    scratch_export = getattr(_thread_state, "scratch_export", None)
     if scratch is None or len(scratch) < blocksize:
+        if scratch_export is not None:
+            scratch_export.close()
         scratch = bytearray(max(blocksize, 1))
         _thread_state.scratch = scratch
-    scratch_export = BufferExport(scratch, writable=True)
+        scratch_export = BufferExport(scratch, writable=True)
+        _thread_state.scratch_export = scratch_export
     table = getattr(_thread_state, "table", None)
     if table is None:
         table = (ctypes.c_int32 * 65536)()

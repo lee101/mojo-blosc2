@@ -1,5 +1,6 @@
 """Blocked byte-shuffle plus LZ4 compression in the Blosc2 chunk format."""
 
+from std.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
@@ -52,8 +53,7 @@ def is_run(src: BPtr, size: Int, value: UInt8) -> Bool:
     var i = 1
     var expected = SIMD[DType.uint8, BYTE_W](value)
     while i + BYTE_W <= size:
-        var differences = src.load[width=BYTE_W, alignment=1](i) ^ expected
-        if differences.cast[DType.uint64]().reduce_add() != 0:
+        if src.load[width=BYTE_W, alignment=1](i) != expected:
             return False
         i += BYTE_W
     while i < size:
@@ -359,8 +359,7 @@ def shuffle_bytes(
             var stop = elements * (item + 1) // work_items
             shuffle_elements(src, dst, elements, typesize, start, stop)
 
-        for item in range(work_items):
-            work(item)
+        parallelize[work](work_items, workers)
     else:
         shuffle_elements(src, dst, elements, typesize, 0, elements)
     var tail = size - remainder
@@ -449,8 +448,7 @@ def unshuffle_bytes(
             var stop = elements * (item + 1) // work_items
             unshuffle_elements(src, dst, elements, typesize, start, stop)
 
-        for item in range(work_items):
-            work(item)
+        parallelize[work](work_items, workers)
     else:
         unshuffle_elements(src, dst, elements, typesize, 0, elements)
     var tail = size - remainder

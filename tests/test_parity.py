@@ -60,9 +60,12 @@ def test_simd_shuffle_unaligned_source_and_scalar_tail(typesize):
     assert mojo.byte_unshuffle(expected, typesize) == bytes(source)
 
 
-@pytest.mark.parametrize("size", [32 * 1024 * 1024 - 4, 32 * 1024 * 1024])
+@pytest.mark.parametrize(
+    "size",
+    [32 * 1024 * 1024 - 4, 32 * 1024 * 1024, 32 * 1024 * 1024 + 3],
+)
 def test_shuffle_parallel_threshold_matches_serial(size):
-    source = np.arange(size // 4, dtype=np.uint32)
+    source = np.arange((size + 3) // 4, dtype=np.uint32).view(np.uint8)[:size]
     expected = mojo.byte_shuffle(source, 4, nthreads=1)
     actual = mojo.byte_shuffle(source, 4, nthreads=4)
     assert actual == expected
