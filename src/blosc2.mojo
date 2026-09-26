@@ -1,6 +1,5 @@
 """Blocked byte-shuffle plus LZ4 compression in the Blosc2 chunk format."""
 
-from std.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
@@ -353,13 +352,10 @@ def shuffle_bytes(
         if work_items > 32:
             work_items = 32
 
-        @parameter
-        def work(item: Int):
+        for item in range(work_items):
             var start = elements * item // work_items
             var stop = elements * (item + 1) // work_items
             shuffle_elements(src, dst, elements, typesize, start, stop)
-
-        parallelize[work](work_items, workers)
     else:
         shuffle_elements(src, dst, elements, typesize, 0, elements)
     var tail = size - remainder
@@ -442,13 +438,10 @@ def unshuffle_bytes(
         if work_items > 32:
             work_items = 32
 
-        @parameter
-        def work(item: Int):
+        for item in range(work_items):
             var start = elements * item // work_items
             var stop = elements * (item + 1) // work_items
             unshuffle_elements(src, dst, elements, typesize, start, stop)
-
-        parallelize[work](work_items, workers)
     else:
         unshuffle_elements(src, dst, elements, typesize, 0, elements)
     var tail = size - remainder

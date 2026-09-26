@@ -48,10 +48,12 @@ filter-pipeline settings are rejected instead of ignored.
 Not covered are ZSTD, BLOSCLZ, Zlib, LZ4HC encoding, bitshuffle, delta and lossy
 filters, dictionaries, parallel LZ4 parsing, user plugins, `SChunk`, compressed
 frames, `NDArray`, lazy expressions, and buffers larger than one Blosc2 chunk.
-The `nthreads` parameter parallelizes independent shuffle ranges for blocks at
-least 32 MiB; smaller blocks stay serial because thread launch overhead is
-larger than the saved work. Compression levels select the LZ4 search
-acceleration; they do not provide an HC parser.
+`nthreads` splits the shuffle into independent element ranges at 32 MiB and
+above; the shuffle is a pure byte-plane gather/scatter, so each range runs on
+the calling thread and smaller blocks stay serial because the split would cost
+more than it saves.
+Compression levels select the LZ4 search acceleration; they do not provide an
+HC parser.
 
 `byte_shuffle` and `byte_unshuffle` are additional direct helpers for the
 filter kernel. They preserve any final bytes that do not form a complete
