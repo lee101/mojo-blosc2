@@ -88,8 +88,66 @@ def write_u32(dst: BPtr, i: Int, value: Int):
 
 
 @always_inline
-def hash_sequence(src: BPtr, i: Int) -> Int:
-    return Int((read_u32(src, i) * UInt32(2654435761)) >> 16)
+def read_u64(src: BPtr, i: Int) -> UInt64:
+    return (
+        UInt64(src[i])
+        | (UInt64(src[i + 1]) << 8)
+        | (UInt64(src[i + 2]) << 16)
+        | (UInt64(src[i + 3]) << 24)
+        | (UInt64(src[i + 4]) << 32)
+        | (UInt64(src[i + 5]) << 40)
+        | (UInt64(src[i + 6]) << 48)
+        | (UInt64(src[i + 7]) << 56)
+    )
+
+
+@always_inline
+def read_u16(src: BPtr, i: Int) -> UInt16:
+    return UInt16(src[i]) | (UInt16(src[i + 1]) << 8)
+
+
+@always_inline
+def write_u64(dst: BPtr, i: Int, value: UInt64):
+    dst[i] = UInt8(value & 255)
+    dst[i + 1] = UInt8((value >> 8) & 255)
+    dst[i + 2] = UInt8((value >> 16) & 255)
+    dst[i + 3] = UInt8((value >> 24) & 255)
+    dst[i + 4] = UInt8((value >> 32) & 255)
+    dst[i + 5] = UInt8((value >> 40) & 255)
+    dst[i + 6] = UInt8((value >> 48) & 255)
+    dst[i + 7] = UInt8((value >> 56) & 255)
+
+
+@always_inline
+def match_length(src: BPtr, match_pos: Int, ip: Int, limit: Int) -> Int:
+    comptime BYTE_W = simdwidthof[DType.float64]() * 8
+    var match_size = 4
+    var vector_limit = limit - BYTE_W
+    while match_size <= vector_limit:
+        var a = src.load[width=BYTE_W, alignment=1](match_pos + match_size)
+        var b = src.load[width=BYTE_W, alignment=1](ip + match_size)
+        if a != b:
+            break
+        match_size += BYTE_W
+    var word_limit = limit - 8
+    while match_size <= word_limit:
+        if read_u64(src, match_pos + match_size) != read_u64(
+            src, ip + match_size
+        ):
+            break
+        match_size += 8
+    var dword_limit = limit - 4
+    while match_size <= dword_limit:
+        if read_u32(src, match_pos + match_size) != read_u32(
+            src, ip + match_size
+        ):
+            break
+        match_size += 4
+    while match_size < limit:
+        if src[match_pos + match_size] != src[ip + match_size]:
+            break
+        match_size += 1
+    return match_size
 
 
 def emit_length(dst: BPtr, pos: Int, value: Int) -> Int:
@@ -103,7 +161,8 @@ def emit_length(dst: BPtr, pos: Int, value: Int) -> Int:
     return op + 1
 
 
-def lz4_compress(
+@always_inline
+def lz4_encode[use_epoch: Bool](
     src: BPtr,
     src_size: Int,
     dst: BPtr,
@@ -112,9 +171,6 @@ def lz4_compress(
     acceleration: Int,
     table_epoch: Int,
 ) -> Int:
-    if table_epoch == 0:
-        clear_table(table)
-
     var anchor = 0
     var ip = 0
     var op = 0
@@ -122,47 +178,31 @@ def lz4_compress(
     if step < 1:
         step = 1
     var search_attempts = step << 6
+    var search_limit = src_size - 12
+    var match_base = src_size - 5
 
-    while ip + 12 <= src_size:
-        var h = hash_sequence(src, ip)
-        var entry = Int(table[h])
+    while ip <= search_limit:
+        var word = read_u32(src, ip)
+        var h = Int((word * UInt32(2654435761)) >> 16)
         var match_pos = -1
-        if table_epoch == 0:
-            match_pos = entry
-            table[h] = Int32(ip)
-        else:
-            if entry >= 0 and entry >> 16 == table_epoch:
+        if use_epoch:
+            var entry = Int(table.unsafe_load(h))
+            if entry >> 16 == table_epoch:
                 match_pos = entry & 65535
-            table[h] = Int32((table_epoch << 16) | ip)
+            table.unsafe_store(h, Int32((table_epoch << 16) | ip))
+        else:
+            var entry = Int(table.unsafe_load(h))
+            if entry >= 0 and ip - entry <= 65535:
+                match_pos = entry
+            table.unsafe_store(h, Int32(ip))
 
-        var matched = False
-        if match_pos >= 0 and ip - match_pos <= 65535:
-            matched = read_u32(src, match_pos) == read_u32(src, ip)
-
-        if not matched:
-            var skip = search_attempts >> 6
+        if match_pos < 0 or read_u32(src, match_pos) != word:
+            ip += search_attempts >> 6
             search_attempts += 1
-            ip += skip
             continue
 
         var literal_size = ip - anchor
-        var match_size = 4
-        comptime BYTE_W = simdwidthof[DType.float64]() * 8
-        while ip + match_size + BYTE_W <= src_size - 5:
-            var match_values = src.load[width=BYTE_W, alignment=1](
-                match_pos + match_size
-            )
-            var input_values = src.load[width=BYTE_W, alignment=1](
-                ip + match_size
-            )
-            if match_values != input_values:
-                break
-            match_size += BYTE_W
-        while (
-            ip + match_size < src_size - 5
-            and src[match_pos + match_size] == src[ip + match_size]
-        ):
-            match_size += 1
+        var match_size = match_length(src, match_pos, ip, match_base - ip)
 
         if (
             op + literal_size + literal_size // 255 + match_size // 255 + 8
@@ -170,15 +210,14 @@ def lz4_compress(
         ):
             return -2
 
-        var token_pos = op
-        op += 1
         var literal_token = literal_size
         if literal_token > 15:
             literal_token = 15
         var match_token = match_size - 4
         if match_token > 15:
             match_token = 15
-        dst[token_pos] = UInt8((literal_token << 4) | match_token)
+        dst[op] = UInt8((literal_token << 4) | match_token)
+        op += 1
 
         if literal_size >= 15:
             op = emit_length(dst, op, literal_size - 15)
@@ -195,13 +234,16 @@ def lz4_compress(
         ip += match_size
         anchor = ip
         search_attempts = step << 6
-        if ip >= 2 and ip + 2 < src_size:
-            if table_epoch == 0:
-                table[hash_sequence(src, ip - 2)] = Int32(ip - 2)
-            else:
-                table[hash_sequence(src, ip - 2)] = Int32(
-                    (table_epoch << 16) | (ip - 2)
+        if ip + 2 < src_size:
+            var tail_h = Int(
+                (read_u32(src, ip - 2) * UInt32(2654435761)) >> 16
+            )
+            if use_epoch:
+                table.unsafe_store(
+                    tail_h, Int32((table_epoch << 16) | (ip - 2))
                 )
+            else:
+                table.unsafe_store(tail_h, Int32(ip - 2))
 
     var literal_size = src_size - anchor
     if op + literal_size + literal_size // 255 + 2 > dst_capacity:
@@ -215,6 +257,25 @@ def lz4_compress(
         op = emit_length(dst, op, literal_size - 15)
     copy_bytes(dst, op, src, anchor, literal_size)
     return op + literal_size
+
+
+def lz4_compress(
+    src: BPtr,
+    src_size: Int,
+    dst: BPtr,
+    dst_capacity: Int,
+    table: I32Ptr,
+    acceleration: Int,
+    table_epoch: Int,
+) -> Int:
+    if table_epoch == 0:
+        clear_table(table)
+        return lz4_encode[False](
+            src, src_size, dst, dst_capacity, table, acceleration, 0
+        )
+    return lz4_encode[True](
+        src, src_size, dst, dst_capacity, table, acceleration, table_epoch
+    )
 
 
 def lz4_decompress(
@@ -273,20 +334,28 @@ def lz4_decompress(
         comptime BYTE_W = simdwidthof[DType.float64]() * 8
         if offset >= BYTE_W:
             copy_bytes(dst, op, dst, match_pos, match_size)
-        elif match_size >= BYTE_W and BYTE_W % offset == 0:
-            var pattern = SIMD[DType.uint8, BYTE_W]()
-            for lane in range(BYTE_W):
-                pattern[lane] = dst[match_pos + lane % offset]
+        elif offset >= 8:
             var j = 0
-            while j + BYTE_W <= match_size:
-                dst.store[alignment=1](op + j, pattern)
-                j += BYTE_W
+            while j + 8 <= match_size:
+                write_u64(dst, op + j, read_u64(dst, match_pos + j))
+                j += 8
             while j < match_size:
                 dst[op + j] = dst[match_pos + j]
                 j += 1
         else:
-            for j in range(match_size):
+            var j = 0
+            if match_size >= 8 and offset <= 2:
+                var word = UInt64(0)
+                if offset == 1:
+                    word = UInt64(dst[match_pos]) * 0x0101010101010101
+                else:
+                    word = UInt64(read_u16(dst, match_pos)) * 0x0001000100010001
+                while j + 8 <= match_size:
+                    write_u64(dst, op + j, word)
+                    j += 8
+            while j < match_size:
                 dst[op + j] = dst[match_pos + j]
+                j += 1
         op += match_size
 
     return op
@@ -533,7 +602,7 @@ def compress_chunk(
         write_u32(dst, 32 + 4 * block, op)
 
         var filtered = src + input_offset
-        if filter_code == 1:
+        if filter_code == 1 and typesize > 1:
             shuffle_bytes(filtered, scratch, bsize, typesize, workers)
             filtered = scratch
 

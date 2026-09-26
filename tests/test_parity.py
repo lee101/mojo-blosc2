@@ -155,6 +155,92 @@ def test_incompressible_input_uses_standard_memcpy_chunk():
     assert upstream.decompress(encoded) == source
 
 
+@pytest.mark.parametrize("typesize", [4, 8])
+def test_repeated_compression_does_not_reuse_stale_hash_entries(typesize):
+    generator = np.random.default_rng(11)
+    for seed in range(6):
+        x = np.linspace(0, 40 + 7 * seed, 500_000, dtype=np.float64)
+        source = (np.sin(x) * 1000.0 + generator.normal(0, 0.5, x.size)).astype(
+            np.float64
+        )
+        if typesize == 4:
+            source = source.view(np.int32)
+        encoded = mojo.compress(
+            source,
+            typesize=typesize,
+            clevel=5,
+            filter=mojo.Filter.SHUFFLE,
+            codec=mojo.Codec.LZ4,
+        )
+        assert upstream.decompress(encoded) == source.tobytes()
+        assert mojo.decompress(encoded) == source.tobytes()
+
+
+def handcrafted_lz4_chunk(offset, match_length, tail=b"ABCDE"):
+    literals = bytes((i * 37 + 5) & 255 for i in range(64))
+    block = bytearray()
+    block.append((min(len(literals), 15) << 4) | 15)
+    remaining = len(literals) - 15
+    if len(literals) >= 15:
+        while remaining >= 255:
+            block.append(255)
+            remaining -= 255
+        block.append(remaining)
+    block += literals
+    block += bytes([offset & 255, (offset >> 8) & 255])
+    encoded_match = match_length - 19
+    while encoded_match >= 255:
+        block.append(255)
+        encoded_match -= 255
+    block.append(encoded_match)
+    block.append(len(tail) << 4)
+    block += tail
+    expected = bytearray(literals)
+    for index in range(match_length):
+        expected.append(expected[len(literals) + index - offset])
+    expected += tail
+    header = bytearray(32)
+    header[0] = 5
+    header[1] = 1
+    header[2] = 37
+    header[3] = 1
+    struct.pack_into(
+        "<iii", header, 4, len(expected), len(expected), 40 + len(block)
+    )
+    header[21] = 1
+    header[22] = 1
+    return (
+        bytes(header)
+        + struct.pack("<i", 36)
+        + struct.pack("<i", len(block))
+        + bytes(block),
+        bytes(expected),
+    )
+
+
+def test_shuffle_filter_with_typesize_one_stays_wire_compatible():
+    source = np.random.default_rng(21).integers(
+        0, 256, size=400_000, dtype=np.uint8
+    )
+    encoded = mojo.compress(
+        source,
+        typesize=1,
+        clevel=5,
+        filter=mojo.Filter.SHUFFLE,
+        codec=mojo.Codec.LZ4,
+    )
+    assert mojo.decompress(encoded) == source.tobytes()
+    assert upstream.decompress(encoded) == source.tobytes()
+
+
+@pytest.mark.parametrize("offset", [1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 31, 32, 63])
+@pytest.mark.parametrize("match_length", [19, 24, 27, 300, 1021])
+def test_decoder_match_copies_for_every_offset_width(offset, match_length):
+    chunk, expected = handcrafted_lz4_chunk(offset, match_length)
+    assert upstream.decompress(chunk) == expected
+    assert mojo.decompress(chunk) == expected
+
+
 def test_compress2_cross_compatibility_with_explicit_pipeline():
     source = np.arange(300_000, dtype=np.int64)
     encoded = mojo.compress2(
