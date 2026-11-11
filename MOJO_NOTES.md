@@ -99,6 +99,15 @@ Do NOT write `from std.algorithm import parallelize` and assume it works. Keep
 the work serial and say so honestly in the benchmark table; only use something
 from the `max` package if you have compiled it and measured it.
 
+Re-probed again during the parallel phase on this same pinned compiler:
+
+| construct | result on 1.2.0 |
+| --- | --- |
+| `max.algorithm.parallelize` | `unable to locate module 'max'` — the env ships **no `max` package** (`pixi run python -c "import max"` → `ModuleNotFoundError`) |
+| `std.algorithm.parallel_for` / `.spawn` / `.barriered` | `package 'algorithm' does not contain ...` |
+| `from max import *` / `from std.algorithm import *` | compiles silently — a missing module does **not** fail through a star import, so only a named-symbol import is a real probe |
+| `@parameter` on a nested function | accepted but deprecated (`use '@__parameter'`) |
+
 ## 5. GPU — the `std.gpu` module is GONE in this toolchain
 
 Re-probed on 1.2.0: **`from std.gpu import thread_idx` no longer works.** The whole

@@ -72,6 +72,38 @@ def test_shuffle_parallel_threshold_matches_serial(size):
     assert mojo.byte_unshuffle(actual, 4, nthreads=4) == source.tobytes()
 
 
+@pytest.mark.parametrize("typesize", [4, 8])
+@pytest.mark.parametrize("threads", [2, 4])
+@pytest.mark.parametrize("size", [4 << 20, 32 << 20, (32 << 20) + 12])
+def test_serial_and_parallel_shuffle_paths_are_identical(typesize, threads, size):
+    # Covers both what callers pass today (4 MiB: below the 32 MiB split, so both
+    # thread counts take the identical serial path) and both sides of the split.
+    storage = np.random.default_rng(size + threads).integers(
+        0, 256, size=size, dtype=np.uint8
+    )
+    storage = storage[: size - size % typesize]
+    serial = mojo.byte_shuffle(storage, typesize, nthreads=1)
+    parallel = mojo.byte_shuffle(storage, typesize, nthreads=threads)
+    assert parallel == serial == reference_shuffle(storage, typesize)
+    assert mojo.byte_unshuffle(parallel, typesize, nthreads=threads) == storage.tobytes()
+    assert mojo.byte_unshuffle(parallel, typesize, nthreads=1) == storage.tobytes()
+
+
+@pytest.mark.parametrize("threads", [2, 4])
+@pytest.mark.parametrize("size", [1 << 20, (32 << 20) + 4096])
+def test_serial_and_parallel_compress_output_is_identical(threads, size):
+    source = np.arange(size // 4, dtype=np.int32)
+    serial = mojo.compress2(
+        source, codec=mojo.Codec.LZ4, typesize=4, nthreads=1
+    )
+    parallel = mojo.compress2(
+        source, codec=mojo.Codec.LZ4, typesize=4, nthreads=threads
+    )
+    assert parallel == serial
+    assert mojo.decompress2(parallel, nthreads=threads) == source.tobytes()
+    assert mojo.decompress2(serial, nthreads=threads) == source.tobytes()
+
+
 @pytest.mark.parametrize("size", [0, 1, 15, 31, 32, 100, 4096, 300_000])
 @pytest.mark.parametrize("filter_code", [mojo.Filter.NOFILTER, mojo.Filter.SHUFFLE])
 def test_roundtrip_across_sizes(size, filter_code):

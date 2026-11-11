@@ -49,9 +49,9 @@ Not covered are ZSTD, BLOSCLZ, Zlib, LZ4HC encoding, bitshuffle, delta and lossy
 filters, dictionaries, parallel LZ4 parsing, user plugins, `SChunk`, compressed
 frames, `NDArray`, lazy expressions, and buffers larger than one Blosc2 chunk.
 `nthreads` splits the shuffle into independent element ranges at 32 MiB and
-above; the shuffle is a pure byte-plane gather/scatter, so each range runs on
-the calling thread and smaller blocks stay serial because the split would cost
-more than it saves.
+above, but there is no worker API on this toolchain, so those ranges still run
+one after another on the calling thread and the split measures no faster than
+the serial loop (see Parallelism below).
 Compression levels select the LZ4 search acceleration; they do not provide an
 HC parser.
 
@@ -146,7 +146,72 @@ There is also no CPU parallelism. `std.algorithm.parallelize`,
 toolchain, and `std.algorithm` no longer exports `sort`, so the work is
 serial. The `nthreads` argument still splits a shuffle into independent
 element ranges at 32 MiB and above, but those ranges run one after another on
-the calling thread, so `nthreads=4` and `nthreads=1` measure the same.
+the calling thread.
+
+### Parallelism: what was measured, and why no parallel path shipped
+
+The mandated API, `parallelize` from `max.algorithm`, cannot be compiled here.
+The pinned environment (`mojo ==1.2.0.dev2026092605`) ships no `max` package at
+all — `pixi run mojo build` fails with `unable to locate module 'max'` on
+`from max.algorithm import parallelize`, and the Python side has no `max` module
+either. Probing every module that does exist gives the same answer as
+`MOJO_NOTES.md` section 4: `std.algorithm` has no `parallelize`, no `spawn`,
+no `parallel_for`; `std.sys` has none either; `std.threading` does not exist.
+No worker-creation primitive is reachable, so a real multi-core split could not
+be written, let alone benchmarked. Nothing in `src/` was changed in this pass:
+a parallel path that cannot be built would be a claim, not a change.
+
+What was measured instead is the split that already exists in the codebase,
+`shuffle_bytes` / `unshuffle_bytes` dividing the element range across
+`workers` (driven by `nthreads`), against `nthreads=1`. Median of five rounds,
+each round the best of five inner runs, `uint32` input, `byte_shuffle` /
+`byte_unshuffle` directly:
+
+| bytes | op | 1 thread | 2 | 4 | 8 | 4 vs 1 | same output |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 4 MiB | shuffle | 0.61 ms | 0.60 | 0.60 | 0.60 | 1.02x | yes |
+| 4 MiB | unshuffle | 0.38 ms | 0.37 | 0.37 | 0.38 | 1.00x | yes |
+| 8 MiB | shuffle | 1.20 ms | 1.20 | 1.21 | 1.23 | 1.00x | yes |
+| 8 MiB | unshuffle | 0.79 ms | 0.76 | 0.76 | 0.74 | 1.04x | yes |
+| 16 MiB | shuffle | 2.96 ms | 2.90 | 3.38 | 3.61 | 0.87x | yes |
+| 16 MiB | unshuffle | 2.17 ms | 2.27 | 2.36 | 2.67 | 0.92x | yes |
+| 32 MiB | shuffle | 25.62 ms | 26.75 | 25.62 | 25.58 | 1.00x | yes |
+| 32 MiB | unshuffle | 22.48 ms | 23.97 | 22.69 | 24.50 | 0.99x | yes |
+| 64 MiB | shuffle | 54.69 ms | 52.44 | 51.70 | 51.59 | 1.06x | yes |
+| 64 MiB | unshuffle | 45.13 ms | 45.50 | 46.92 | 45.74 | 0.96x | yes |
+| 128 MiB | shuffle | 105.22 ms | 109.85 | 106.69 | 110.00 | 0.99x | yes |
+| 128 MiB | unshuffle | 99.20 ms | 95.48 | 96.85 | 98.12 | 1.02x | yes |
+
+Every ratio is between 0.87x and 1.06x with no trend in thread count — 4 and 8
+threads are as often slower as faster — which is what a serial loop looks like,
+not a crossover. There is no size at which the split wins, so there is no
+threshold to derive, and the existing 32 MiB `PARALLEL_THRESHOLD` is not
+supported by any speedup. The gain does not merely flatten past 4 workers; it
+was never there at any count. At 16 MiB the split is 13 percent *slower*,
+because the four ranges each restart the vector loop and lose the sequential
+access pattern.
+
+The caller path agrees. `compress2` / `decompress2` on 32 MB float64 and 16-64 MB
+int32, `nthreads` 1 / 2 / 4 / 8, best of five:
+
+| case | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| compress smooth float64, 32 MB | 524.48 ms | 547.92 | 545.26 | 547.00 |
+| compress int32 arange, 16 MB | 7.80 ms | 7.63 | 7.87 | 8.15 |
+| compress int32 arange, 64 MB | 37.25 ms | 37.14 | 36.74 | 36.90 |
+| decompress smooth float64, 32 MB | 320.14 ms | 304.50 | 311.17 | 296.69 |
+
+Compressed bytes were asserted identical across all four thread counts, and
+decompressed bytes identical to the source, inside the harness. The only
+differences are host noise; `nthreads` is a no-op for performance.
+
+So the outcome of this pass is a revert/no-ship, stated plainly: no parallel
+path was added, the existing split was not extended or tuned, and no threshold
+was assigned from these numbers because no thread count above one won at any
+size. Real callers here default to `nthreads=1` anyway, and the sizes where a
+split could theoretically pay (>= 32 MiB) are also where it measures neutral to
+slower. The performance table above is therefore unchanged by this pass: there
+are no before/after numbers to report because there is no after.
 
 A loop-tail and unrolling reduction pass was run against this path and kept
 nothing, so
