@@ -12,7 +12,7 @@ def copy_bytes(dst: BPtr, dst_pos: Int, src: BPtr, src_pos: Int, size: Int):
     comptime BYTE_W = simdwidthof[DType.float64]() * 8
     var i = 0
     while i + BYTE_W <= size:
-        var values = src.load[width=BYTE_W, alignment=1](src_pos + i)
+        var values = src.unsafe_load[width=BYTE_W, alignment=1](src_pos + i)
         dst.store[alignment=1](dst_pos + i, values)
         i += BYTE_W
     while i < size:
@@ -52,7 +52,7 @@ def is_run(src: BPtr, size: Int, value: UInt8) -> Bool:
     var i = 1
     var expected = SIMD[DType.uint8, BYTE_W](value)
     while i + BYTE_W <= size:
-        if src.load[width=BYTE_W, alignment=1](i) != expected:
+        if src.unsafe_load[width=BYTE_W, alignment=1](i) != expected:
             return False
         i += BYTE_W
     while i < size:
@@ -124,8 +124,8 @@ def match_length(src: BPtr, match_pos: Int, ip: Int, limit: Int) -> Int:
     var match_size = 4
     var vector_limit = limit - BYTE_W
     while match_size <= vector_limit:
-        var a = src.load[width=BYTE_W, alignment=1](match_pos + match_size)
-        var b = src.load[width=BYTE_W, alignment=1](ip + match_size)
+        var a = src.unsafe_load[width=BYTE_W, alignment=1](match_pos + match_size)
+        var b = src.unsafe_load[width=BYTE_W, alignment=1](ip + match_size)
         if a != b:
             break
         match_size += BYTE_W
@@ -375,7 +375,7 @@ def shuffle_elements(
     if typesize == 4:
         comptime PLANE_W = BYTE_W // 4
         while element + PLANE_W <= stop:
-            var values = src.load[width=BYTE_W, alignment=1](element * 4)
+            var values = src.unsafe_load[width=BYTE_W, alignment=1](element * 4)
             var even, odd = values.deinterleave()
             var byte0, byte2 = even.deinterleave()
             var byte1, byte3 = odd.deinterleave()
@@ -387,7 +387,7 @@ def shuffle_elements(
     elif typesize == 8:
         comptime PLANE_W = BYTE_W // 8
         while element + PLANE_W <= stop:
-            var values = src.load[width=BYTE_W, alignment=1](element * 8)
+            var values = src.unsafe_load[width=BYTE_W, alignment=1](element * 8)
             var even, odd = values.deinterleave()
             var byte04, byte26 = even.deinterleave()
             var byte15, byte37 = odd.deinterleave()
@@ -446,12 +446,12 @@ def unshuffle_elements(
     if typesize == 4:
         comptime PLANE_W = BYTE_W // 4
         while element + PLANE_W <= stop:
-            var byte0 = src.load[width=PLANE_W, alignment=1](element)
-            var byte1 = src.load[width=PLANE_W, alignment=1](elements + element)
-            var byte2 = src.load[width=PLANE_W, alignment=1](
+            var byte0 = src.unsafe_load[width=PLANE_W, alignment=1](element)
+            var byte1 = src.unsafe_load[width=PLANE_W, alignment=1](elements + element)
+            var byte2 = src.unsafe_load[width=PLANE_W, alignment=1](
                 2 * elements + element
             )
-            var byte3 = src.load[width=PLANE_W, alignment=1](
+            var byte3 = src.unsafe_load[width=PLANE_W, alignment=1](
                 3 * elements + element
             )
             var even = byte0.interleave(byte2)
@@ -461,24 +461,24 @@ def unshuffle_elements(
     elif typesize == 8:
         comptime PLANE_W = BYTE_W // 8
         while element + PLANE_W <= stop:
-            var byte0 = src.load[width=PLANE_W, alignment=1](element)
-            var byte1 = src.load[width=PLANE_W, alignment=1](elements + element)
-            var byte2 = src.load[width=PLANE_W, alignment=1](
+            var byte0 = src.unsafe_load[width=PLANE_W, alignment=1](element)
+            var byte1 = src.unsafe_load[width=PLANE_W, alignment=1](elements + element)
+            var byte2 = src.unsafe_load[width=PLANE_W, alignment=1](
                 2 * elements + element
             )
-            var byte3 = src.load[width=PLANE_W, alignment=1](
+            var byte3 = src.unsafe_load[width=PLANE_W, alignment=1](
                 3 * elements + element
             )
-            var byte4 = src.load[width=PLANE_W, alignment=1](
+            var byte4 = src.unsafe_load[width=PLANE_W, alignment=1](
                 4 * elements + element
             )
-            var byte5 = src.load[width=PLANE_W, alignment=1](
+            var byte5 = src.unsafe_load[width=PLANE_W, alignment=1](
                 5 * elements + element
             )
-            var byte6 = src.load[width=PLANE_W, alignment=1](
+            var byte6 = src.unsafe_load[width=PLANE_W, alignment=1](
                 6 * elements + element
             )
-            var byte7 = src.load[width=PLANE_W, alignment=1](
+            var byte7 = src.unsafe_load[width=PLANE_W, alignment=1](
                 7 * elements + element
             )
             var byte04 = byte0.interleave(byte4)
