@@ -90,12 +90,20 @@ same host, because the machine is shared and a single run varies by roughly
 
 | case | mojo-blosc2 | upstream blosc2 | relative | before | before relative |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| compress int32 arange, 8 MB | 1.85 ms | 2.23 ms | 1.21x | 1.96 ms | 1.12x |
-| decompress int32 arange, 8 MB | 1.33 ms | 1.17 ms | 0.88x | 4.24 ms | 0.31x |
-| compress smooth float64, 16 MB | 17.28 ms | 12.16 ms | 0.70x | 18.12 ms | 0.61x |
-| decompress smooth float64, 16 MB | 8.16 ms | 4.04 ms | 0.49x | 10.30 ms | 0.38x |
-| compress random bytes, 8 MiB | 2.82 ms | 2.43 ms | 0.86x | 2.73 ms | 0.85x |
-| decompress memcpy chunk, 8 MiB | 0.78 ms | 0.66 ms | 0.85x | 0.76 ms | 0.83x |
+| compress int32 arange, 8 MB | 1.88 ms | 2.23 ms | 1.19x | 1.82 ms | 1.15x |
+| decompress int32 arange, 8 MB | 1.43 ms | 1.19 ms | 0.83x | 1.32 ms | 0.88x |
+| compress smooth float64, 16 MB | 17.78 ms | 12.53 ms | 0.70x | 17.88 ms | 0.70x |
+| decompress smooth float64, 16 MB | 9.44 ms | 4.61 ms | 0.49x | 9.01 ms | 0.52x |
+| compress random bytes, 8 MiB | 2.72 ms | 2.38 ms | 0.87x | 3.07 ms | 0.80x |
+| decompress memcpy chunk, 8 MiB | 0.82 ms | 0.66 ms | 0.81x | 0.78 ms | 0.82x |
+
+The `mojo-blosc2` column is the median of three `pixi run bench` runs and
+`upstream blosc2` the median of the paired runs in those same three. `before`
+is the previous revision (`f886e3e`) built from source and benched on the same
+host immediately afterwards, also three runs, median. The two columns are
+therefore the same code: the loop-unrolling pass below kept no change, and the
+differences between the columns are the host's run-to-run noise, which reached
+20 percent on individual runs during that pass.
 
 The decoder is where the port was furthest behind, and the two changes that
 moved it are both about overlapping match copies rather than about the vector
@@ -140,8 +148,38 @@ serial. The `nthreads` argument still splits a shuffle into independent
 element ranges at 32 MiB and above, but those ranges run one after another on
 the calling thread, so `nthreads=4` and `nthreads=1` measure the same.
 
-Two further candidates were measured and rejected, and the code was left as it
-was rather than made more complex for the same number:
+A loop-tail and unrolling reduction pass was run against this path and kept
+nothing, so
+the table above is one revision against itself. What was tried, and the
+measurement that rejected it:
+
+- Multi-accumulator reductions were not applicable. There is no
+  floating-point accumulation anywhere in the codec: the hot loops are byte
+  gathers, a hash table, and match copies. Nothing was reordered, and the
+  parity tests, which include every handcrafted decoder case and bidirectional
+  upstream decoding, pass unchanged with no tolerance touched.
+- Compile-time unrolling of the fixed-trip-count loops. This toolchain has
+  replaced `@parameter for` with `comptime for`, and `@parameter` on a `for`
+  is now a parse error. The one loop whose trip count is a true constant, the
+  scalar byte-plane gather in `shuffle_elements`, was rewritten as a
+  `comptime for byte_index` with `typesize` as a compile-time parameter and
+  moved into its own helper. It measured 115.0 us per 256 KiB `typesize=4`
+  block against 113.8 us for the plain `for` loop, inside the host's noise, so
+  it was reverted rather than kept for a more complex kernel.
+- The other small fixed-count loops already compile to their unrolled form.
+  `read_u32` emits one 32-bit `mov`, and `write_u32`/`write_u64` collapse into
+  a single store, so there is no loop left to remove.
+- Removing bounds-check and index arithmetic in `match_length`. After the
+  32-byte, 8-byte and 4-byte stages the remaining at most three bytes are
+  scalar on purpose: a short tail amortises to under 0.2 percent of a
+  compress. Two wider rewrites of that tail were built and rejected on
+  correctness before timing, a byte-equality mask on a 4-byte xor that
+  counted matches wrongly (int32 output 128,620 bytes instead of 89,705) and
+  a `count_leading_zeros` prefix count that failed the parity tests.
+
+Two further candidates from an earlier revision were also measured and
+rejected, and the code was left as it was rather than made more complex for
+the same number:
 
 - Widening the `typesize=8` shuffle from four-byte plane stores to eight-byte
   stores, by loading two 32-byte vectors and joining the corresponding byte

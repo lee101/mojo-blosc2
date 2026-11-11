@@ -30,6 +30,13 @@ toolchain bump rather than trusting this file.
   A hardcoded `comptime W = 4` is always valid and is often the better choice.
 - `SIMD` has no `.min()` / `.max()` methods. The free `min(a, b)` / `max(a, b)`
   work on both scalars and `SIMD` values.
+- **`@parameter for` is gone. Use `comptime for`.** Probed on 1.2.0: a
+  decorated `for` is a parse error (`'for' statement does not support
+  decorators`), and the compiler's own string table says `'@parameter' is
+  deprecated; use '@__parameter'` — but `@__parameter for` also fails to
+  parse. `comptime for i in range(N):` (plain, no decorator) compiles and
+  unrolls, as does `comptime for i in range(a, b, step):`. The loop variable
+  is not an `Int`: cast it, `Int(k)`, before using it as a subscript.
 
 ## 2. Export / FFI
 
