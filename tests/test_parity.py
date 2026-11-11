@@ -89,6 +89,23 @@ def test_serial_and_parallel_shuffle_paths_are_identical(typesize, threads, size
     assert mojo.byte_unshuffle(parallel, typesize, nthreads=1) == storage.tobytes()
 
 
+@pytest.mark.parametrize("typesize", [4, 8])
+@pytest.mark.parametrize("threads", [2, 4])
+def test_byte_shuffle_below_split_threshold_is_complete(typesize, threads):
+    # 16 MiB is below the 32 MiB split, so nthreads is not supposed to matter.
+    # This pins the sub-threshold path to the serial reference layout at a size
+    # the existing tests do not cover (they check 4 MiB, 32 MiB and 32 MiB + 12).
+    size = 16 << 20
+    storage = np.random.default_rng(size + threads).integers(
+        0, 256, size=size, dtype=np.uint8
+    )
+    storage = storage[: size - size % typesize]
+    serial = mojo.byte_shuffle(storage, typesize, nthreads=1)
+    parallel = mojo.byte_shuffle(storage, typesize, nthreads=threads)
+    assert parallel == serial == reference_shuffle(storage, typesize)
+    assert mojo.byte_unshuffle(parallel, typesize, nthreads=threads) == storage.tobytes()
+
+
 @pytest.mark.parametrize("threads", [2, 4])
 @pytest.mark.parametrize("size", [1 << 20, (32 << 20) + 4096])
 def test_serial_and_parallel_compress_output_is_identical(threads, size):

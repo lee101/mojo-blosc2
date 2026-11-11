@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import subprocess
@@ -26,8 +27,23 @@ def best_time(function, repetitions=7):
     for _ in range(repetitions):
         start = time.perf_counter()
         result = function()
-        best = min(best, time.perf_counter() - start)
-    return best, result
+        elapsed = time.perf_counter() - start
+        digest = output_digest(result)
+        best = min(best, elapsed)
+    return best, result, digest
+
+
+def output_digest(result):
+    if isinstance(result, (bytes, bytearray)):
+        return hashlib.sha256(result).hexdigest()
+    memory = memoryview(result)
+    try:
+        # `memory.cast("B")` keeps a reference to the cast view, so the only
+        # handle that may be released twice here is the original `memory`.
+        view = memory.cast("B") if memory.format not in ("B", "b") else memory
+        return hashlib.sha256(view).hexdigest()
+    finally:
+        memory.release()
 
 
 def machine():
@@ -188,7 +204,7 @@ def main():
                 ),
             ),
         ]:
-            seconds, _ = best_time(function)
+            seconds, _, _ = best_time(function)
             print(f"| {name} | {seconds * 1000:.2f} ms |")
         print()
 
@@ -238,7 +254,7 @@ def main():
                 random_bytes,
                 **upstream_params(1, upstream.Filter.NOFILTER),
             ),
-            "compress",
+            "compress_native_typesize_one",
             random_bytes.tobytes(),
         ),
         (
@@ -260,15 +276,40 @@ def main():
     print("| case | mojo-blosc2 | upstream blosc2 | relative |")
     print("| --- | ---: | ---: | ---: |")
     for name, mojo_function, upstream_function, operation, original in cases:
-        mojo_seconds, mojo_result = best_time(mojo_function)
-        upstream_seconds, upstream_result = best_time(upstream_function)
-        if operation == "compress":
+        mojo_seconds, mojo_result, mojo_digest = best_time(mojo_function)
+        upstream_seconds, upstream_result, upstream_digest = best_time(
+            upstream_function
+        )
+        if operation.startswith("compress"):
+            if operation == "compress_native_typesize_one":
+                # typesize=1 byte shuffle is the identity, so upstream's own
+                # native typesize=1 call must round-trip to the original bytes
+                # as well; this keeps that assumption pinned to upstream.
+                native = upstream.compress(
+                    random_bytes, codec=upstream.Codec.LZ4, clevel=5
+                )
+                if upstream.decompress2(native) != original:
+                    raise AssertionError(
+                        f"upstream native typesize=1 path changed for {name}"
+                    )
             if upstream.decompress2(mojo_result) != original:
                 raise AssertionError(f"Mojo result failed verification for {name}")
             if mojo.decompress2(upstream_result) != original:
-                raise AssertionError(f"upstream result failed verification for {name}")
+                raise AssertionError(
+                    "upstream result failed verification for "
+                    f"{name}: {len(upstream_result)} bytes, upstream round-trips "
+                    f"to {upstream.decompress2(upstream_result) == original}"
+                )
         elif mojo_result != upstream_result or mojo_result != original:
             raise AssertionError(f"benchmark outputs differ for {name}")
+        # The only cross-side digest that must match is between the two sides
+        # of a decompression row: both decode the exact same upstream chunk.
+        # Compression output is permitted to differ in bytes; it is checked
+        # above by round-tripping through the other implementation instead.
+        if operation == "decompress" and mojo_digest != upstream_digest:
+            raise AssertionError(
+                f"decompressed bytes differ between sides for {name}"
+            )
         relative = upstream_seconds / mojo_seconds
         print(
             f"| {name} | {mojo_seconds * 1000:.2f} ms | "

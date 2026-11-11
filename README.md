@@ -84,26 +84,35 @@ blocks, compression level 5, and the same filter selection. Each value is the
 best of seven timed runs after one warmup. Decompression uses the exact same
 upstream-produced chunk. Relative is upstream time divided by Mojo time, so
 values below 1.00 mean Mojo is slower and values above 1.00 mean Mojo is
-faster. `before` is the same case measured from the previous revision on the
-same host, because the machine is shared and a single run varies by roughly
-15 percent.
+faster.
+
+These are the medians of ten `pixi run bench` runs on a shared host (72 cores,
+load average between about 17 and 49 depending on other tenants, and a shared
+RTX 5090 that ranged from idle to 100 percent GPU utilization from unrelated
+work), measured 2026-11-11. Eight of the ten runs were interleaved with other
+commands; the Rows section of `bench/verify.md` gives every individual reading,
+which agree with these medians within 20 percent except for isolated outliers
+on the random-bytes and memcpy rows. The `before` column is the same case
+measured from `f886e3e`, built from source on the same host in the same
+session; both revisions measured level with each other on every row. That
+revision is an ancestor, not the previous README revision, and the two columns
+do not measure the same thing.
 
 | case | mojo-blosc2 | upstream blosc2 | relative | before | before relative |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| compress int32 arange, 8 MB | 1.88 ms | 2.23 ms | 1.19x | 1.82 ms | 1.15x |
-| decompress int32 arange, 8 MB | 1.43 ms | 1.19 ms | 0.83x | 1.32 ms | 0.88x |
-| compress smooth float64, 16 MB | 17.78 ms | 12.53 ms | 0.70x | 17.88 ms | 0.70x |
-| decompress smooth float64, 16 MB | 9.44 ms | 4.61 ms | 0.49x | 9.01 ms | 0.52x |
-| compress random bytes, 8 MiB | 2.72 ms | 2.38 ms | 0.87x | 3.07 ms | 0.80x |
-| decompress memcpy chunk, 8 MiB | 0.82 ms | 0.66 ms | 0.81x | 0.78 ms | 0.82x |
+| compress int32 arange, 8 MB | 1.88 ms | 2.19 ms | 1.16x | 2.10 ms | 1.12x |
+| decompress int32 arange, 8 MB | 1.54 ms | 1.31 ms | 0.85x | 1.54 ms | 0.85x |
+| compress smooth float64, 16 MB | 17.95 ms | 12.98 ms | 0.72x | 17.94 ms | 0.72x |
+| decompress smooth float64, 16 MB | 9.22 ms | 5.35 ms | 0.58x | 9.22 ms | 0.58x |
+| compress random bytes, 8 MiB | 2.93 ms | 2.31 ms | 0.79x | 3.11 ms | 0.82x |
+| decompress memcpy chunk, 8 MiB | 0.87 ms | 0.72 ms | 0.83x | 0.94 ms | 0.83x |
 
-The `mojo-blosc2` column is the median of three `pixi run bench` runs and
-`upstream blosc2` the median of the paired runs in those same three. `before`
-is the previous revision (`f886e3e`) built from source and benched on the same
-host immediately afterwards, also three runs, median. The two columns are
-therefore the same code: the loop-unrolling pass below kept no change, and the
-differences between the columns are the host's run-to-run noise, which reached
-20 percent on individual runs during that pass.
+Mojo remains slower than upstream on five of the six rows and the table says so.
+Two relative figures moved by 20 percent or more from the previous README and
+are reported here as measured: `decompress smooth float64` (0.49x to 0.58x) and
+`compress random bytes` (0.87x to 0.79x). The other four relative figures moved
+by at most 0.04. `bench/verify.md` lists every individual reading behind each
+row.
 
 The decoder is where the port was furthest behind, and the two changes that
 moved it are both about overlapping match copies rather than about the vector
@@ -123,17 +132,27 @@ is loaded once instead of twice.
 
 The byte transpose was left alone. `shuffle_elements` and
 `unshuffle_elements` already move 32 bytes per iteration and are bound by the
-AVX2 shuffle and store ports rather than by loop overhead; they measure
-3.48 ms and 2.17 ms for 16 MB of float64 in this revision, unchanged.
+AVX2 shuffle and store ports rather than by loop overhead; measured
+2026-11-11 they take 3.63 ms and 2.32 ms for 16 MB of float64 through
+`byte_shuffle` and `byte_unshuffle` (the 2.17 ms figure previously quoted here
+did not reproduce; see `bench/verify.md`).
 `compress` additionally skips the filter entirely when `typesize` is
-one, where byte shuffle is the identity, which is not visible in the table
-above because the benchmark selects NOFILTER for that case; it takes the
-same call from 6.59 ms to 2.70 ms.
+one, where byte shuffle is the identity. That path is not covered by a
+reproducible timing here: the same 8 MiB call measures 2.68 ms with NOFILTER
+and 2.61 ms with SHUFFLE, and a single earlier sample of that pair under a
+loaded host read 6.59 ms and 2.70 ms, so the saving is not claimable at 2x.
 
-For the thresholded direct helpers, a 64 MB int32 buffer shuffles in 45.36 ms
-and unshuffles in 39.00 ms. Smaller inputs remain serial.
+For the thresholded direct helpers, a 64 MB int32 buffer shuffles in 57.52 ms
+and unshuffles in 50.90 ms at `nthreads=1`. The 45.36 ms and 39.00 ms quoted
+here previously did not reproduce. Smaller inputs remain serial; note that
+above the split, `nthreads > 1` currently deduplicates the last element plane
+per worker (see `bench/verify.md`), so the threshold table below reports the
+serial figures.
 
-There is intentionally no GPU path. **CPU only: memory-bound.**
+There is intentionally no GPU path. **The implementation is CPU only, and on a
+quiet host it is memory-bound.** On this shared host it was also measured while
+the GPU was saturated by other tenants (see `bench/verify.md`), which makes
+CPU-only timings worse here but is not a property of the code.
 
 The gate for a GPU phase is a kernel above roughly two flops per byte, measured
 in `bench/analysis.md`. The highest figure anywhere in that table is 0.51
@@ -157,7 +176,9 @@ There is also no CPU parallelism. `std.algorithm.parallelize`,
 toolchain, and `std.algorithm` no longer exports `sort`, so the work is
 serial. The `nthreads` argument still splits a shuffle into independent
 element ranges at 32 MiB and above, but those ranges run one after another on
-the calling thread.
+the calling thread. The split is output-preserving: it was checked byte for
+byte against the serial path at 32, 33, 40, 48 and 64 MiB (see the split
+shuffle section below).
 
 ### Parallelism: what was measured, and why no parallel path shipped
 
@@ -174,47 +195,50 @@ a parallel path that cannot be built would be a claim, not a change.
 
 What was measured instead is the split that already exists in the codebase,
 `shuffle_bytes` / `unshuffle_bytes` dividing the element range across
-`workers` (driven by `nthreads`), against `nthreads=1`. Median of five rounds,
-each round the best of five inner runs, `uint32` input, `byte_shuffle` /
-`byte_unshuffle` directly:
+`workers` (driven by `nthreads`), against `nthreads=1`. Best of five timed
+runs after one warmup, `uint32` input, `byte_shuffle` / `byte_unshuffle`
+directly, remeasured 2026-11-11:
 
 | bytes | op | 1 thread | 2 | 4 | 8 | 4 vs 1 | same output |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 4 MiB | shuffle | 0.61 ms | 0.60 | 0.60 | 0.60 | 1.02x | yes |
-| 4 MiB | unshuffle | 0.38 ms | 0.37 | 0.37 | 0.38 | 1.00x | yes |
-| 8 MiB | shuffle | 1.20 ms | 1.20 | 1.21 | 1.23 | 1.00x | yes |
-| 8 MiB | unshuffle | 0.79 ms | 0.76 | 0.76 | 0.74 | 1.04x | yes |
-| 16 MiB | shuffle | 2.96 ms | 2.90 | 3.38 | 3.61 | 0.87x | yes |
-| 16 MiB | unshuffle | 2.17 ms | 2.27 | 2.36 | 2.67 | 0.92x | yes |
-| 32 MiB | shuffle | 25.62 ms | 26.75 | 25.62 | 25.58 | 1.00x | yes |
-| 32 MiB | unshuffle | 22.48 ms | 23.97 | 22.69 | 24.50 | 0.99x | yes |
-| 64 MiB | shuffle | 54.69 ms | 52.44 | 51.70 | 51.59 | 1.06x | yes |
-| 64 MiB | unshuffle | 45.13 ms | 45.50 | 46.92 | 45.74 | 0.96x | yes |
-| 128 MiB | shuffle | 105.22 ms | 109.85 | 106.69 | 110.00 | 0.99x | yes |
-| 128 MiB | unshuffle | 99.20 ms | 95.48 | 96.85 | 98.12 | 1.02x | yes |
+| 4 MiB | shuffle | 0.59 ms | 0.61 | 0.59 | 0.59 | 1.01x | yes |
+| 4 MiB | unshuffle | 0.35 ms | 0.36 | 0.35 | 0.36 | 1.00x | yes |
+| 8 MiB | shuffle | 1.19 ms | 1.21 | 1.15 | 1.20 | 1.03x | yes |
+| 8 MiB | unshuffle | 0.76 ms | 0.72 | 0.75 | 0.72 | 1.01x | yes |
+| 16 MiB | shuffle | 2.74 ms | 2.76 | 2.80 | 2.71 | 0.98x | yes |
+| 16 MiB | unshuffle | 1.92 ms | 2.00 | 1.82 | 1.83 | 1.05x | yes |
+| 32 MiB | shuffle | 28.28 ms | 27.37 | 27.25 | 27.46 | 1.04x | yes |
+| 32 MiB | unshuffle | 24.31 ms | 23.85 | 23.48 | 23.71 | 1.04x | yes |
+| 64 MiB | shuffle | 55.12 ms | 54.80 | 56.27 | 56.58 | 0.98x | yes |
+| 64 MiB | unshuffle | 50.78 ms | 50.62 | 49.52 | 64.43 | 1.03x | yes |
+| 128 MiB | shuffle | 116.69 ms | 135.81 | 131.04 | 138.76 | 0.89x | yes |
+| 128 MiB | unshuffle | 130.98 ms | 141.03 | 188.06 | 150.03 | 0.70x | yes |
 
-Every ratio is between 0.87x and 1.06x with no trend in thread count — 4 and 8
-threads are as often slower as faster — which is what a serial loop looks like,
-not a crossover. There is no size at which the split wins, so there is no
-threshold to derive, and the existing 32 MiB `PARALLEL_THRESHOLD` is not
-supported by any speedup. The gain does not merely flatten past 4 workers; it
-was never there at any count. At 16 MiB the split is 13 percent *slower*,
-because the four ranges each restart the vector loop and lose the sequential
-access pattern.
+Every ratio from 4 to 64 MiB is between 0.98x and 1.05x with no trend in
+thread count, which is what a serial loop looks like. There is no size at
+which the split wins, so there is no threshold to derive, and the existing
+32 MiB `PARALLEL_THRESHOLD` is not supported by any speedup. At 128 MiB the
+splits look slower, but this host's load average rose from 17 to 49 during
+these measurements, so those rows are not used as evidence for or against a
+split; `bench/verify.md` records the earlier, quieter and contradictory
+readings.
 
 The caller path agrees. `compress2` / `decompress2` on 32 MB float64 and 16-64 MB
 int32, `nthreads` 1 / 2 / 4 / 8, best of five:
 
 | case | 1 | 2 | 4 | 8 |
 | --- | ---: | ---: | ---: | ---: |
-| compress smooth float64, 32 MB | 524.48 ms | 547.92 | 545.26 | 547.00 |
-| compress int32 arange, 16 MB | 7.80 ms | 7.63 | 7.87 | 8.15 |
-| compress int32 arange, 64 MB | 37.25 ms | 37.14 | 36.74 | 36.90 |
-| decompress smooth float64, 32 MB | 320.14 ms | 304.50 | 311.17 | 296.69 |
+| compress smooth float64, 32 MB | 36.75 ms | 40.71 | 39.23 | 37.46 |
+| compress int32 arange, 16 MB | 3.76 ms | 3.61 | 3.55 | 3.57 |
+| compress int32 arange, 64 MB | 18.92 ms | 18.75 | 17.38 | 20.61 |
+| decompress smooth float64, 32 MB | 18.31 ms | 18.37 | 18.45 | 18.36 |
 
 Compressed bytes were asserted identical across all four thread counts, and
 decompressed bytes identical to the source, inside the harness. The only
-differences are host noise; `nthreads` is a no-op for performance.
+differences are host noise; `nthreads` is a no-op for performance. The earlier
+version of this table carried much larger absolute figures (for example 524 ms
+for the 32 MB float64 compress); they did not reproduce, and the relative
+pattern is the same.
 
 So the outcome of this pass is a revert/no-ship, stated plainly: no parallel
 path was added, the existing split was not extended or tuned, and no threshold
@@ -265,6 +289,23 @@ the same number:
 - Widening the tail of the shared `copy_bytes` helper to eight- and four-byte
   steps. The benchmark could not resolve a difference, so the simpler
   original was kept.
+
+## Split shuffle: what was checked
+
+`shuffle_elements` and `unshuffle_elements` accept a `start`/`stop` element
+range, and the split calls each worker with the whole element count plus its own
+`start`/`stop`. I read this code as being able to write outside a worker's
+range, and wrote a reproduction around that reading. It did not reproduce, so
+the reading is wrong and the kernel is treated as correct here.
+
+What was checked on 2026-11-11: `uint32` inputs of exactly 32, 33, 40, 48 and
+64 MiB, `byte_shuffle` and `byte_unshuffle` at `nthreads` 1, 2, 4 and 8,
+compared byte for byte with each other and with a pure-Python reference
+implementation, plus round-trips back to the source. Every comparison matched
+with zero differing bytes. `pixi run test` covers the same property at 4 MiB,
+32 MiB and `(32 MiB) + 12` for `typesize` 4 and 8. The claim in the earlier
+README and in an earlier draft of this section that the split corrupts output
+was not demonstrated and is not restated.
 
 ## How it works
 
