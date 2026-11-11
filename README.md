@@ -133,13 +133,24 @@ same call from 6.59 ms to 2.70 ms.
 For the thresholded direct helpers, a 64 MB int32 buffer shuffles in 45.36 ms
 and unshuffles in 39.00 ms. Smaller inputs remain serial.
 
-There is intentionally no GPU path. The `std.gpu` module, including
-`DeviceContext`, is absent from this toolchain, so no device path can be built
-or run here. It would not pay off anyway: shuffle, fill, copies, and
-hash-table clearing move far more bytes than arithmetic operations, while LZ4
-parsing is branch-dependent and sequential within each stream. None reaches
-the roughly two-flops-per-byte threshold where device transfer and launch
-costs would be justified.
+There is intentionally no GPU path. **CPU only: memory-bound.**
+
+The gate for a GPU phase is a kernel above roughly two flops per byte, measured
+in `bench/analysis.md`. The highest figure anywhere in that table is 0.51
+(`decompress2` int32 / LZ4 decode int32) and the dominant stages sit at
+0.06-0.32; shuffle, fill, copies, and hash-table clearing move far more bytes
+than arithmetic operations, and LZ4 parsing is branch-dependent and sequential
+within each stream. Every hotspot is therefore below the threshold, so no
+kernel becomes a GPU candidate and none is worth a 16 MB device transfer per
+call. That verdict rests on the measurement, not on the toolchain.
+
+The toolchain closes the door as well. The `std.gpu` module, including
+`DeviceContext`, is absent from this pinned toolchain, so no device path can be
+built or run here. For the record, the shared GPU was checked as the phase
+required: `nvidia-smi --query-gpu=memory.free` reported 5552 MiB free at the
+time, above the 4000 MiB floor, so the skip is the flops-per-byte gate, not
+memory pressure. No GPU code, test, or benchmark was added; there are
+therefore no GPU tests to skip, on this host or a CPU-only one.
 
 There is also no CPU parallelism. `std.algorithm.parallelize`,
 `std.sys.parallelize`, and `std.sys.spawn` are all absent from this
